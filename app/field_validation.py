@@ -13,6 +13,7 @@ MISSING_VALUE_ISSUE = "字段缺失，需人工确认"
 MISSING_CONFIDENCE_ISSUE = "字段未提供置信度，需人工确认"
 LOW_CONFIDENCE_ISSUE = "字段置信度低，需人工确认"
 MULTIPLE_CANDIDATES_ISSUE = "检测到多个候选值，需人工确认"
+CROSS_PAGE_CONFLICT_ISSUE = "不同页面存在不一致候选值，需人工确认"
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +64,15 @@ def assess_field_results(
 
         if len(result.candidates) > 1:
             _append_once(result.validation_issues, MULTIPLE_CANDIDATES_ISSUE)
+            candidate_values = {candidate.value.strip() for candidate in result.candidates}
+            candidate_pages = {
+                evidence.page_number
+                for candidate in result.candidates
+                for evidence in candidate.evidence
+                if evidence.page_number is not None
+            }
+            if len(candidate_values) > 1 and len(candidate_pages) > 1:
+                _append_once(result.validation_issues, CROSS_PAGE_CONFLICT_ISSUE)
 
     return assessed
 

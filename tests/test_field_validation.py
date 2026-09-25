@@ -3,6 +3,7 @@
 import unittest
 
 from app.field_validation import (
+    CROSS_PAGE_CONFLICT_ISSUE,
     LOW_CONFIDENCE_ISSUE,
     MISSING_CONFIDENCE_ISSUE,
     MISSING_VALUE_ISSUE,
@@ -10,7 +11,7 @@ from app.field_validation import (
     FieldValidationPolicy,
     assess_field_results,
 )
-from app.state import FieldCandidate, FieldResult
+from app.state import FieldCandidate, FieldResult, SourceEvidence
 
 
 class FieldValidationPolicyTests(unittest.TestCase):
@@ -90,6 +91,19 @@ class AssessFieldResultsTests(unittest.TestCase):
 
         self.assertEqual(source["carrier"].validation_issues, [])
         self.assertIsNot(source["carrier"], assessed["carrier"])
+
+    def test_marks_distinct_candidates_found_on_different_pages(self) -> None:
+        result = FieldResult(
+            "yard",
+            candidates=[
+                FieldCandidate("场站 A", evidence=(SourceEvidence("doc", 1),)),
+                FieldCandidate("场站 B", evidence=(SourceEvidence("doc", 2),)),
+            ],
+        )
+
+        assessed = assess_field_results({"yard": result}, self.policy)
+
+        self.assertIn(CROSS_PAGE_CONFLICT_ISSUE, assessed["yard"].validation_issues)
 
 
 if __name__ == "__main__":
