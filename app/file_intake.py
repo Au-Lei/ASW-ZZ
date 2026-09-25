@@ -22,6 +22,7 @@ class IntakeErrorCode(StrEnum):
     TYPE_MISMATCH = "type_mismatch"
     DAMAGED = "damaged"
     ENCRYPTED = "encrypted"
+    UNSAFE_CONTENT = "unsafe_content"
 
 
 class FileIntakeError(ValueError):
@@ -95,6 +96,12 @@ class FileIntakeService:
         known_hashes: Mapping[str, str] | Collection[str] = (),
     ) -> IntakeResult:
         safe_basename = PurePath(filename.replace("\\", "/")).name
+        if (
+            not safe_basename.strip()
+            or len(safe_basename) > 255
+            or any(ord(character) < 32 for character in safe_basename)
+        ):
+            raise FileIntakeError(IntakeErrorCode.UNSAFE_CONTENT, "文件名包含不安全字符")
         extension = PurePath(safe_basename).suffix.lower()
         rule = self._by_extension.get(extension)
         if rule is None:
@@ -130,6 +137,10 @@ class FileIntakeService:
                 raise FileIntakeError(IntakeErrorCode.DAMAGED, "PDF 文件结构不完整")
             if re.search(rb"/Encrypt\b", content):
                 raise FileIntakeError(IntakeErrorCode.ENCRYPTED, "PDF 文件已加密")
+            if re.search(rb"/(?:JavaScript|JS|Launch|EmbeddedFile)\b", content):
+                raise FileIntakeError(
+                    IntakeErrorCode.UNSAFE_CONTENT, "PDF 包含不允许的主动内容"
+                )
             return
         if media_type == "image/png":
             if not content.startswith(b"\x89PNG\r\n\x1a\n") or not content.endswith(b"IEND\xaeB`\x82"):
@@ -146,6 +157,10 @@ def _validate_openxml(
     media_type: str, content: bytes, policy: FileIntakePolicy
 ) -> None:
     if not content.startswith(b"PK"):
+        if content.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1") and (
+            b"EncryptedPackage" in content or b"EncryptionInfo" in content
+        ):
+            raise FileIntakeError(IntakeErrorCode.ENCRYPTED, "Office 文件已加密")
         raise FileIntakeError(IntakeErrorCode.DAMAGED, "Office 文件不是有效的 Open XML 文档")
     required_part = {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "word/document.xml",
@@ -161,9 +176,18 @@ def _validate_openxml(
                 raise FileIntakeError(IntakeErrorCode.TOO_LARGE, "Office 文件解压后超过安全限制")
             if any(info.flag_bits & 0x1 for info in entries):
                 raise FileIntakeError(IntakeErrorCode.ENCRYPTED, "Office 文件已加密")
+            _validate_archive_members(entries)
             names = set(archive.namelist())
             if "[Content_Types].xml" not in names or required_part not in names:
                 raise FileIntakeError(IntakeErrorCode.TYPE_MISMATCH, "Office 文件内容与扩展名不一致")
+            for info in entries:
+                if info.filename.lower().endswith((".xml", ".rels")):
+                    xml_prefix = archive.read(info, pwd=None)[:4096].lower()
+                    if b"<!doctype" in xml_prefix or b"<!entity" in xml_prefix:
+                        raise FileIntakeError(
+                            IntakeErrorCode.UNSAFE_CONTENT,
+                            "Office 文件包含不允许的 XML 外部实体声明",
+                        )
             bad_member = archive.testzip()
             if bad_member is not None:
                 raise FileIntakeError(IntakeErrorCode.DAMAGED, "Office 文件结构损坏")
@@ -171,6 +195,36 @@ def _validate_openxml(
         raise
     except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
         raise FileIntakeError(IntakeErrorCode.DAMAGED, "Office 文件结构损坏") from exc
+
+
+def _validate_archive_members(entries: list[zipfile.ZipInfo]) -> None:
+    normalized_names: set[str] = set()
+    for info in entries:
+        name = info.filename.replace("\\", "/")
+        parts = name.split("/")
+        normalized = name.casefold()
+        unix_type = (info.external_attr >> 16) & 0o170000
+        if (
+            not name
+            or "\x00" in name
+            or name.startswith("/")
+            or re.match(r"^[a-zA-Z]:", name)
+            or ".." in parts
+            or unix_type == 0o120000
+            or normalized in normalized_names
+        ):
+            raise FileIntakeError(
+                IntakeErrorCode.UNSAFE_CONTENT, "Office 压缩包包含不安全路径或重复条目"
+            )
+        normalized_names.add(normalized)
+        if (
+            normalized.endswith("vbaproject.bin")
+            or "/embeddings/" in f"/{normalized}"
+            or "/externallinks/" in f"/{normalized}"
+        ):
+            raise FileIntakeError(
+                IntakeErrorCode.UNSAFE_CONTENT, "Office 文件包含宏、嵌入对象或外部链接"
+            )
 
 
 def _duplicate_document_id(
