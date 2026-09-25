@@ -17,6 +17,7 @@ from app.tools.field_extractor import FieldExtractionError
 
 EXTRACTOR_VERSION = "schema-validating-field-extractor-v1"
 AIParameterValue = str | int | float | bool | None
+_SENSITIVE_PARAMETER_PARTS = ("key", "token", "secret", "password", "credential", "authorization")
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +40,8 @@ class AITextResponse:
             raise ValueError("参数名不能为空")
         if len(parameter_names) != len(set(parameter_names)):
             raise ValueError("参数名不能重复")
+        if any(any(part in name.casefold() for part in _SENSITIVE_PARAMETER_PARTS) for name in parameter_names):
+            raise ValueError("调用参数不能包含认证信息")
         if self.request_id is not None and not self.request_id.strip():
             raise ValueError("request_id 不能为空字符串")
 
@@ -146,14 +149,14 @@ class SchemaValidatingFieldExtractor:
                 if error.retryable and attempt < self._policy.max_attempts:
                     continue
                 reason = "调用超时或暂时不可用" if error.retryable else "调用配置或权限错误"
-                raise ManualReviewRequired(reason, attempt) from error
+                raise ManualReviewRequired(reason, attempt) from None
 
             try:
                 return self._validate_response(document, response)
             except FieldExtractionError as error:
                 if attempt < self._policy.max_attempts:
                     continue
-                raise ManualReviewRequired("响应不符合字段契约", attempt) from error
+                raise ManualReviewRequired("响应不符合字段契约", attempt) from None
 
         raise AssertionError("有限尝试循环不应无结果结束")
 
@@ -176,13 +179,16 @@ class SchemaValidatingFieldExtractor:
         )
         self.last_trace = trace
         self.traces.append(trace)
-        payload = _load_json_object(response.text)
-        results = {
-            field_name: _parse_field_result(field_name, value)
-            for field_name, value in payload.items()
-        }
-        validate_extraction_results(document, results)
-        return results
+        try:
+            payload = _load_json_object(response.text)
+            results = {
+                field_name: _parse_field_result(field_name, value)
+                for field_name, value in payload.items()
+            }
+            validate_extraction_results(document, results)
+            return results
+        except (FieldExtractionError, ValueError) as error:
+            raise FieldExtractionError("AI 响应不符合字段契约") from None
 
 
 def _load_json_object(response: str) -> dict[str, Any]:
@@ -191,7 +197,7 @@ def _load_json_object(response: str) -> dict[str, Any]:
     try:
         payload = json.loads(response, object_pairs_hook=_unique_object)
     except (json.JSONDecodeError, ValueError) as error:
-        raise FieldExtractionError(f"AI 响应不是有效的唯一键 JSON: {error}") from error
+        raise FieldExtractionError("AI 响应不是有效的唯一键 JSON") from error
     if not isinstance(payload, dict):
         raise FieldExtractionError("AI 响应根节点必须是 JSON 对象")
     return payload
@@ -201,7 +207,7 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError(f"存在重复键: {key}")
+            raise ValueError("存在重复键")
         result[key] = value
     return result
 
