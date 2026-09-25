@@ -1,0 +1,75 @@
+"""文档解析器的通用接口和返回数据结构。
+
+具体的 PDF、图片或办公文档解析器将在后续实现。本模块只定义各解析器
+都必须遵守的契约，使上层流程不依赖某一个第三方解析库。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
+
+from app.state import SourceDocument
+
+
+class DocumentParseError(Exception):
+    """文档无法按解析器契约处理时抛出的基础异常。"""
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedPage:
+    """单页解析结果。
+
+    空文本是合法结果，例如扫描页在 OCR 之前可能暂时没有可用文字。
+    """
+
+    page_number: int
+    text: str
+
+    def __post_init__(self) -> None:
+        if self.page_number < 1:
+            raise ValueError("page_number 必须从 1 开始")
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedDocument:
+    """保留页级边界的文档解析结果。"""
+
+    document_id: str
+    pages: tuple[ParsedPage, ...]
+    warnings: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.document_id.strip():
+            raise ValueError("document_id 不能为空")
+        if not self.pages:
+            raise ValueError("解析结果必须至少包含一页")
+
+        page_numbers = tuple(page.page_number for page in self.pages)
+        if page_numbers != tuple(sorted(page_numbers)):
+            raise ValueError("pages 必须按页码升序排列")
+        if len(page_numbers) != len(set(page_numbers)):
+            raise ValueError("pages 不能包含重复页码")
+
+
+@runtime_checkable
+class DocumentParser(Protocol):
+    """所有具体文档解析器必须实现的接口。"""
+
+    def supports(self, media_type: str) -> bool:
+        """返回解析器是否支持指定的 MIME 类型。"""
+
+        ...
+
+    def parse(
+        self,
+        document: SourceDocument,
+        content: bytes,
+    ) -> ParsedDocument:
+        """解析文件内容，并保留页级文字与警告。
+
+        实现不得根据业务常识补写原文中不存在的内容。无法处理文件时应
+        抛出 :class:`DocumentParseError` 或其子类。
+        """
+
+        ...
