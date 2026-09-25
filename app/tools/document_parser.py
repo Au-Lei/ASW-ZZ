@@ -7,13 +7,48 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 from app.state import SourceDocument
 
 
+class DocumentParseErrorCode(StrEnum):
+    """可持久化和安全展示的解析错误类别。"""
+
+    UNSUPPORTED = "unsupported"
+    DAMAGED = "damaged"
+    ENCRYPTED = "encrypted"
+    TOO_MANY_PAGES = "too_many_pages"
+    PARSER_FAILURE = "parser_failure"
+    CONTRACT_VIOLATION = "contract_violation"
+
+
 class DocumentParseError(Exception):
-    """文档无法按解析器契约处理时抛出的基础异常。"""
+    """文档无法按解析器契约处理时抛出的分类异常。"""
+
+    def __init__(self, code: DocumentParseErrorCode, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class TextRegion:
+    """页面内一段可定位文字；坐标采用解析器原始页面坐标。"""
+
+    text: str
+    left: float
+    top: float
+    right: float
+    bottom: float
+
+    def __post_init__(self) -> None:
+        if not self.text.strip():
+            raise ValueError("区域文字不能为空")
+        if min(self.left, self.top, self.right, self.bottom) < 0:
+            raise ValueError("区域坐标不能小于 0")
+        if self.right <= self.left or self.bottom <= self.top:
+            raise ValueError("区域右下坐标必须大于左上坐标")
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +60,7 @@ class ParsedPage:
 
     page_number: int
     text: str
+    regions: tuple[TextRegion, ...] = ()
 
     def __post_init__(self) -> None:
         if self.page_number < 1:
