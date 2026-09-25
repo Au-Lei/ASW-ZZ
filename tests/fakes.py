@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 from app.state import FieldResult
+from app.tools.ai_field_extractor import AITextResponse
 from app.tools.document_parser import ParsedDocument
 
 
@@ -38,12 +39,26 @@ class FakeFieldExtractor:
 class FakeAITextClient:
     """返回预设文本并记录最后一次调用的 AI 客户端替身。"""
 
-    def __init__(self, response: str) -> None:
-        self.response = response
+    def __init__(
+        self,
+        response: str,
+        *,
+        service: str = "fake-ai",
+        model: str = "fake-model-v1",
+        parameters: tuple[tuple[str, str | int | float | bool | None], ...] = (),
+        request_id: str | None = "fake-request-001",
+    ) -> None:
+        self.response = AITextResponse(
+            text=response,
+            service=service,
+            model=model,
+            parameters=parameters,
+            request_id=request_id,
+        )
         self.system_prompt: str | None = None
         self.user_prompt: str | None = None
 
-    def complete(self, system_prompt: str, user_prompt: str) -> str:
+    def complete(self, system_prompt: str, user_prompt: str) -> AITextResponse:
         self.system_prompt = system_prompt
         self.user_prompt = user_prompt
         return self.response

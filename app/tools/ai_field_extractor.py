@@ -4,20 +4,64 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Protocol, runtime_checkable
 
-from app.extraction_prompt import build_extraction_prompt
+from app.extraction_prompt import PROMPT_VERSION, build_extraction_prompt
 from app.extraction_schema import validate_extraction_results
 from app.state import FieldCandidate, FieldResult, SourceEvidence
 from app.tools.document_parser import ParsedDocument
 from app.tools.field_extractor import FieldExtractionError
 
 
+EXTRACTOR_VERSION = "schema-validating-field-extractor-v1"
+AIParameterValue = str | int | float | bool | None
+
+
+@dataclass(frozen=True, slots=True)
+class AITextResponse:
+    """AI 客户端返回的文本及非敏感调用元数据。"""
+
+    text: str
+    service: str
+    model: str
+    parameters: tuple[tuple[str, AIParameterValue], ...] = ()
+    request_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.service.strip():
+            raise ValueError("service 不能为空")
+        if not self.model.strip():
+            raise ValueError("model 不能为空")
+        parameter_names = tuple(name for name, _ in self.parameters)
+        if any(not name.strip() for name in parameter_names):
+            raise ValueError("参数名不能为空")
+        if len(parameter_names) != len(set(parameter_names)):
+            raise ValueError("参数名不能重复")
+        if self.request_id is not None and not self.request_id.strip():
+            raise ValueError("request_id 不能为空字符串")
+
+
+@dataclass(frozen=True, slots=True)
+class AIExtractionTrace:
+    """一次提取调用的可审计元数据，不包含提示词或业务正文。"""
+
+    document_id: str
+    service: str
+    model: str
+    parameters: tuple[tuple[str, AIParameterValue], ...]
+    request_id: str | None
+    prompt_version: str
+    extractor_version: str
+    recorded_at: datetime
+
+
 @runtime_checkable
 class AITextClient(Protocol):
     """能够返回纯文本响应的最小 AI 客户端接口。"""
 
-    def complete(self, system_prompt: str, user_prompt: str) -> str:
+    def complete(self, system_prompt: str, user_prompt: str) -> AITextResponse:
         """根据系统提示词和用户提示词返回模型文本。"""
 
         ...
@@ -28,11 +72,24 @@ class SchemaValidatingFieldExtractor:
 
     def __init__(self, client: AITextClient) -> None:
         self._client = client
+        self.last_trace: AIExtractionTrace | None = None
 
     def extract(self, document: ParsedDocument) -> dict[str, FieldResult]:
         prompt = build_extraction_prompt(document)
         response = self._client.complete(prompt.system_prompt, prompt.user_prompt)
-        payload = _load_json_object(response)
+        if not isinstance(response, AITextResponse):
+            raise FieldExtractionError("AI 客户端必须返回 AITextResponse")
+        self.last_trace = AIExtractionTrace(
+            document_id=document.document_id,
+            service=response.service,
+            model=response.model,
+            parameters=response.parameters,
+            request_id=response.request_id,
+            prompt_version=PROMPT_VERSION,
+            extractor_version=EXTRACTOR_VERSION,
+            recorded_at=datetime.now(timezone.utc),
+        )
+        payload = _load_json_object(response.text)
         results = {
             field_name: _parse_field_result(field_name, value)
             for field_name, value in payload.items()

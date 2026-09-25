@@ -2,9 +2,16 @@
 
 import json
 import unittest
+from dataclasses import asdict
+from datetime import timezone
 
 from app.extraction_schema import CORE_FIELD_NAMES
-from app.tools.ai_field_extractor import AITextClient, SchemaValidatingFieldExtractor
+from app.tools.ai_field_extractor import (
+    EXTRACTOR_VERSION,
+    AITextClient,
+    AITextResponse,
+    SchemaValidatingFieldExtractor,
+)
 from app.tools.document_parser import ParsedDocument, ParsedPage
 from app.tools.field_extractor import FieldExtractionError, FieldExtractor
 from tests.fakes import FakeAITextClient
@@ -129,6 +136,73 @@ class SchemaValidatingFieldExtractorTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(FieldExtractionError, "重复键"):
+            extractor.extract(self.document)
+
+    def test_records_non_sensitive_call_trace(self) -> None:
+        response_text = json.dumps(_empty_payload())
+        client = FakeAITextClient(
+            response_text,
+            service="example-service",
+            model="example-model",
+            parameters=(("temperature", 0), ("seed", 42)),
+            request_id="request-123",
+        )
+        extractor = SchemaValidatingFieldExtractor(client)
+
+        extractor.extract(self.document)
+
+        trace = extractor.last_trace
+        self.assertIsNotNone(trace)
+        assert trace is not None
+        self.assertEqual(trace.document_id, "notice-001")
+        self.assertEqual(trace.service, "example-service")
+        self.assertEqual(trace.model, "example-model")
+        self.assertEqual(trace.parameters, (("temperature", 0), ("seed", 42)))
+        self.assertEqual(trace.request_id, "request-123")
+        self.assertEqual(trace.prompt_version, "field-extraction-v1")
+        self.assertEqual(trace.extractor_version, EXTRACTOR_VERSION)
+        self.assertIs(trace.recorded_at.tzinfo, timezone.utc)
+
+        trace_text = repr(asdict(trace))
+        self.assertNotIn(response_text, trace_text)
+        self.assertNotIn("Booking No. 276458899", trace_text)
+
+    def test_records_trace_even_when_response_schema_is_invalid(self) -> None:
+        extractor = SchemaValidatingFieldExtractor(
+            FakeAITextClient("not json", request_id="failed-request")
+        )
+
+        with self.assertRaises(FieldExtractionError):
+            extractor.extract(self.document)
+
+        self.assertIsNotNone(extractor.last_trace)
+        assert extractor.last_trace is not None
+        self.assertEqual(extractor.last_trace.request_id, "failed-request")
+
+    def test_response_metadata_rejects_blank_or_duplicate_identifiers(self) -> None:
+        invalid_arguments = (
+            {"service": "", "model": "model"},
+            {"service": "service", "model": ""},
+            {
+                "service": "service",
+                "model": "model",
+                "parameters": (("temperature", 0), ("temperature", 1)),
+            },
+            {"service": "service", "model": "model", "request_id": ""},
+        )
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(ValueError):
+                    AITextResponse(text="{}", **arguments)
+
+    def test_rejects_legacy_plain_text_client_response(self) -> None:
+        class InvalidClient:
+            def complete(self, system_prompt: str, user_prompt: str) -> str:
+                return "{}"
+
+        extractor = SchemaValidatingFieldExtractor(InvalidClient())
+
+        with self.assertRaisesRegex(FieldExtractionError, "AITextResponse"):
             extractor.extract(self.document)
 
 
