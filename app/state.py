@@ -171,6 +171,8 @@ class DocumentTask:
     review_history: list[FieldReviewAudit] = field(default_factory=list)
     status_history: list[TaskStatusAudit] = field(default_factory=list)
     issues: list[str] = field(default_factory=list)
+    parser_version: str | None = None
+    ocr_versions: tuple[str, ...] = ()
     extractor_version: str | None = None
     prompt_version: str | None = None
     ruleset_version: str | None = None
