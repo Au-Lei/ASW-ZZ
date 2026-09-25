@@ -140,6 +140,23 @@ class TaskStatusAudit:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskRetryAudit:
+    """失败任务一次恢复尝试的不可变审计记录。"""
+
+    stage: str
+    attempt: int
+    retried_at: datetime
+
+    def __post_init__(self) -> None:
+        if not self.stage.strip():
+            raise ValueError("stage 不能为空")
+        if self.attempt < 1:
+            raise ValueError("attempt 必须从 1 开始")
+        if self.retried_at.tzinfo is None:
+            raise ValueError("retried_at 必须包含时区")
+
+
+@dataclass(frozen=True, slots=True)
 class SourceDocument:
     """输入文档的基本信息及受控存储引用。"""
 
@@ -170,6 +187,7 @@ class DocumentTask:
     field_results: dict[str, FieldResult] = field(default_factory=dict)
     review_history: list[FieldReviewAudit] = field(default_factory=list)
     status_history: list[TaskStatusAudit] = field(default_factory=list)
+    retry_history: list[TaskRetryAudit] = field(default_factory=list)
     issues: list[str] = field(default_factory=list)
     parser_version: str | None = None
     ocr_versions: tuple[str, ...] = ()

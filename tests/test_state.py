@@ -14,6 +14,7 @@ from app.state import (
     SourceEvidence,
     TaskStatus,
     TaskStatusAudit,
+    TaskRetryAudit,
 )
 
 
@@ -144,6 +145,14 @@ class DocumentTaskTests(unittest.TestCase):
         )
 
         self.assertEqual(second.status_history, [])
+
+    def test_retry_history_is_not_shared_between_tasks(self) -> None:
+        first = DocumentTask(task_id="task-001")
+        second = DocumentTask(task_id="task-002")
+        first.retry_history.append(
+            TaskRetryAudit("ocr", 1, datetime.now(timezone.utc))
+        )
+        self.assertEqual(second.retry_history, [])
 
 
 if __name__ == "__main__":

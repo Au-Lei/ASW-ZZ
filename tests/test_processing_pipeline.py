@@ -2,6 +2,7 @@
 
 import hashlib
 import unittest
+from copy import deepcopy
 from datetime import datetime, timezone
 
 from app.alias_mapping import MappingRegistry
@@ -36,11 +37,13 @@ PDF = b"%PDF-1.7\nvalid test content\n%%EOF"
 class FakeParser:
     def __init__(self, text: str = "enough embedded text for extraction") -> None:
         self.text = text
+        self.calls = 0
 
     def supports(self, media_type: str) -> bool:
         return media_type == "application/pdf"
 
     def parse(self, document: SourceDocument, content: bytes) -> ParsedDocument:
+        self.calls += 1
         return ParsedDocument(document.document_id, (ParsedPage(1, self.text),))
 
 
@@ -79,7 +82,10 @@ def _field_workflow() -> DocumentWorkflow:
 
 
 def _pipeline(
-    *, parser: object | None = None, ocr: OCRProcessingService | None = None
+    *,
+    parser: object | None = None,
+    ocr: OCRProcessingService | None = None,
+    field_workflow: object | None = None,
 ) -> DocumentProcessingPipeline:
     return DocumentProcessingPipeline(
         FileIntakeService(),
@@ -87,7 +93,7 @@ def _pipeline(
             [parser or FakeParser()],
             ParsingPolicy(min_embedded_text_characters=10),
         ),
-        _field_workflow(),
+        field_workflow or _field_workflow(),
         PipelineVersions("parser-v1"),
         ocr=ocr,
         now_provider=lambda: NOW,
@@ -177,6 +183,78 @@ class DocumentProcessingPipelineTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             pipeline.process("task-1", "notice.pdf", PDF)
+
+    def test_retries_parser_without_repeating_file_intake(self) -> None:
+        class FlakyParser(FakeParser):
+            def parse(self, document: SourceDocument, content: bytes) -> ParsedDocument:
+                self.calls += 1
+                if self.calls == 1:
+                    raise DocumentParseError(DocumentParseErrorCode.PARSER_FAILURE, "down")
+                return ParsedDocument(document.document_id, (ParsedPage(1, self.text),))
+
+        parser = FlakyParser()
+        pipeline = _pipeline(parser=parser)
+        failed = pipeline.process("task-1", "notice.pdf", PDF)
+        original_document_id = failed.task.source_documents[0].document_id
+        recovered = pipeline.retry(failed, content=PDF)
+
+        self.assertEqual(recovered.task.status, TaskStatus.PENDING_REVIEW)
+        self.assertEqual(parser.calls, 2)
+        self.assertEqual(recovered.task.source_documents[0].document_id, original_document_id)
+        self.assertEqual(recovered.task.retry_history[0].stage, "parsing")
+        self.assertFalse(any(issue.startswith("文档解析失败") for issue in recovered.task.issues))
+
+    def test_retries_ocr_without_repeating_parser(self) -> None:
+        parser = FakeParser("")
+        provider = FakeOCR(OCRError(OCRErrorCode.INVALID_RESPONSE, "bad"))
+        ocr = OCRProcessingService(
+            provider, FakeRenderer(), OCRPolicy(allow_partial_failure=False)
+        )
+        pipeline = _pipeline(parser=parser, ocr=ocr)
+        failed = pipeline.process("task-1", "scan.pdf", PDF)
+        provider.error = None
+        recovered = pipeline.retry(failed)
+
+        self.assertEqual(recovered.task.status, TaskStatus.PENDING_REVIEW)
+        self.assertEqual(parser.calls, 1)
+        self.assertEqual(recovered.task.ocr_versions, ("fake-ocr:2.0",))
+        self.assertEqual(recovered.task.retry_history[0].stage, "ocr")
+
+    def test_retries_extraction_without_repeating_parser_or_ocr(self) -> None:
+        class FlakyFieldWorkflow:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def process(self, task, document):
+                self.calls += 1
+                result = deepcopy(task)
+                if self.calls == 1:
+                    result.status = TaskStatus.FAILED
+                    result.issues.append("字段提取失败，需检查提取器契约或服务状态")
+                else:
+                    result.status = TaskStatus.PENDING_REVIEW
+                return result
+
+        parser = FakeParser()
+        workflow = FlakyFieldWorkflow()
+        pipeline = _pipeline(parser=parser, field_workflow=workflow)
+        failed = pipeline.process("task-1", "notice.pdf", PDF)
+        recovered = pipeline.retry(failed)
+
+        self.assertEqual(recovered.task.status, TaskStatus.PENDING_REVIEW)
+        self.assertEqual(parser.calls, 1)
+        self.assertEqual(workflow.calls, 2)
+        self.assertEqual(recovered.task.retry_history[0].stage, "extraction")
+        self.assertFalse(any(issue.startswith("字段提取失败") for issue in recovered.task.issues))
+
+    def test_rejects_retry_for_nonfailed_or_intake_failed_task(self) -> None:
+        pipeline = _pipeline()
+        completed = pipeline.process("task-1", "notice.pdf", PDF)
+        with self.assertRaises(ValueError):
+            pipeline.retry(completed)
+        intake_failed = pipeline.process("task-2", "bad.exe", b"bad")
+        with self.assertRaises(ValueError):
+            pipeline.retry(intake_failed)
 
 
 if __name__ == "__main__":
