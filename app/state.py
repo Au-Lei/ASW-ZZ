@@ -147,12 +147,17 @@ class SourceDocument:
     filename: str
     media_type: str | None = None
     content_hash: str | None = None
+    stored_filename: str | None = None
+    byte_size: int | None = None
+    duplicate_of: str | None = None
 
     def __post_init__(self) -> None:
         if not self.document_id.strip():
             raise ValueError("document_id 不能为空")
         if not self.filename.strip():
             raise ValueError("filename 不能为空")
+        if self.byte_size is not None and self.byte_size < 0:
+            raise ValueError("byte_size 不能小于 0")
 
 
 @dataclass(slots=True)
