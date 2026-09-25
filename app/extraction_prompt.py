@@ -40,7 +40,7 @@ def build_extraction_prompt(document: ParsedDocument) -> ExtractionPrompt:
 请提取以下全部字段，字段不得缺失或增加：
 {field_lines}
 
-每个字段使用以下结构：
+输出一个以字段内部名为键的 JSON 根对象。每个字段使用以下结构：
 {{
   "raw_value": string | null,
   "confidence": number | null,

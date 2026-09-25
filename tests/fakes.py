@@ -33,3 +33,17 @@ class FakeFieldExtractor:
                 raise ValueError(f"字段键与 FieldResult.field_name 不一致: {field_name}")
             results[field_name] = deepcopy(result)
         return results
+
+
+class FakeAITextClient:
+    """返回预设文本并记录最后一次调用的 AI 客户端替身。"""
+
+    def __init__(self, response: str) -> None:
+        self.response = response
+        self.system_prompt: str | None = None
+        self.user_prompt: str | None = None
+
+    def complete(self, system_prompt: str, user_prompt: str) -> str:
+        self.system_prompt = system_prompt
+        self.user_prompt = user_prompt
+        return self.response

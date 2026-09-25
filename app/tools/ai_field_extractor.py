@@ -1,0 +1,173 @@
+"""供应商无关的 AI 字段提取适配器。"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Callable
+from typing import Any, Protocol, runtime_checkable
+
+from app.extraction_prompt import build_extraction_prompt
+from app.extraction_schema import validate_extraction_results
+from app.state import FieldCandidate, FieldResult, SourceEvidence
+from app.tools.document_parser import ParsedDocument
+from app.tools.field_extractor import FieldExtractionError
+
+
+@runtime_checkable
+class AITextClient(Protocol):
+    """能够返回纯文本响应的最小 AI 客户端接口。"""
+
+    def complete(self, system_prompt: str, user_prompt: str) -> str:
+        """根据系统提示词和用户提示词返回模型文本。"""
+
+        ...
+
+
+class SchemaValidatingFieldExtractor:
+    """调用 AI 客户端并将严格 JSON 响应转换为字段结果。"""
+
+    def __init__(self, client: AITextClient) -> None:
+        self._client = client
+
+    def extract(self, document: ParsedDocument) -> dict[str, FieldResult]:
+        prompt = build_extraction_prompt(document)
+        response = self._client.complete(prompt.system_prompt, prompt.user_prompt)
+        payload = _load_json_object(response)
+        results = {
+            field_name: _parse_field_result(field_name, value)
+            for field_name, value in payload.items()
+        }
+        validate_extraction_results(document, results)
+        return results
+
+
+def _load_json_object(response: str) -> dict[str, Any]:
+    if not isinstance(response, str):
+        raise FieldExtractionError("AI 响应必须是字符串")
+    try:
+        payload = json.loads(response, object_pairs_hook=_unique_object)
+    except (json.JSONDecodeError, ValueError) as error:
+        raise FieldExtractionError(f"AI 响应不是有效的唯一键 JSON: {error}") from error
+    if not isinstance(payload, dict):
+        raise FieldExtractionError("AI 响应根节点必须是 JSON 对象")
+    return payload
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"存在重复键: {key}")
+        result[key] = value
+    return result
+
+
+def _parse_field_result(field_name: str, value: Any) -> FieldResult:
+    data = _require_object(value, f"字段 {field_name}")
+    _require_exact_keys(
+        data,
+        {"raw_value", "confidence", "evidence", "candidates"},
+        f"字段 {field_name}",
+    )
+    raw_value = _optional_non_empty_string(data["raw_value"], f"字段 {field_name}.raw_value")
+    confidence = _optional_confidence(data["confidence"], f"字段 {field_name}.confidence")
+    evidence = _parse_list(
+        data["evidence"],
+        lambda item: _parse_evidence(item, f"字段 {field_name}.evidence"),
+        f"字段 {field_name}.evidence",
+    )
+    candidates = _parse_list(
+        data["candidates"],
+        lambda item: _parse_candidate(item, field_name),
+        f"字段 {field_name}.candidates",
+    )
+    return FieldResult(
+        field_name=field_name,
+        raw_value=raw_value,
+        confidence=confidence,
+        evidence=evidence,
+        candidates=candidates,
+    )
+
+
+def _parse_candidate(value: Any, field_name: str) -> FieldCandidate:
+    context = f"字段 {field_name}.candidates 项"
+    data = _require_object(value, context)
+    _require_exact_keys(data, {"value", "confidence", "evidence"}, context)
+    candidate_value = _required_non_empty_string(data["value"], f"{context}.value")
+    confidence = _optional_confidence(data["confidence"], f"{context}.confidence")
+    evidence = tuple(
+        _parse_list(
+            data["evidence"],
+            lambda item: _parse_evidence(item, f"{context}.evidence"),
+            f"{context}.evidence",
+        )
+    )
+    return FieldCandidate(candidate_value, confidence, evidence)
+
+
+def _parse_evidence(value: Any, context: str) -> SourceEvidence:
+    data = _require_object(value, context)
+    _require_exact_keys(
+        data,
+        {"document_id", "page_number", "text_excerpt"},
+        context,
+    )
+    document_id = _required_non_empty_string(data["document_id"], f"{context}.document_id")
+    page_number = data["page_number"]
+    if isinstance(page_number, bool) or not isinstance(page_number, int):
+        raise FieldExtractionError(f"{context}.page_number 必须是整数")
+    text_excerpt = _required_non_empty_string(
+        data["text_excerpt"], f"{context}.text_excerpt"
+    )
+    return SourceEvidence(document_id, page_number, text_excerpt)
+
+
+def _require_object(value: Any, context: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise FieldExtractionError(f"{context} 必须是 JSON 对象")
+    if not all(isinstance(key, str) for key in value):
+        raise FieldExtractionError(f"{context} 的键必须是字符串")
+    return value
+
+
+def _require_exact_keys(data: dict[str, Any], expected: set[str], context: str) -> None:
+    actual = set(data)
+    if actual != expected:
+        missing = ", ".join(sorted(expected - actual)) or "无"
+        unexpected = ", ".join(sorted(actual - expected)) or "无"
+        raise FieldExtractionError(
+            f"{context} 属性不符合 Schema；缺少: {missing}；多余: {unexpected}"
+        )
+
+
+def _parse_list(
+    value: Any,
+    parser: Callable[[Any], Any],
+    context: str,
+) -> list[Any]:
+    if not isinstance(value, list):
+        raise FieldExtractionError(f"{context} 必须是数组")
+    return [parser(item) for item in value]
+
+
+def _optional_non_empty_string(value: Any, context: str) -> str | None:
+    if value is None:
+        return None
+    return _required_non_empty_string(value, context)
+
+
+def _required_non_empty_string(value: Any, context: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise FieldExtractionError(f"{context} 必须是非空字符串")
+    return value
+
+
+def _optional_confidence(value: Any, context: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise FieldExtractionError(f"{context} 必须是 0 到 1 的数字或 null")
+    if not 0 <= value <= 1:
+        raise FieldExtractionError(f"{context} 必须在 0 到 1 之间")
+    return float(value)
