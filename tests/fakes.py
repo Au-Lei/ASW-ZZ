@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 from app.state import FieldResult
-from app.tools.ai_field_extractor import AITextResponse
+from app.tools.ai_field_extractor import AIClientError, AITextResponse
 from app.tools.document_parser import ParsedDocument
 
 
@@ -57,8 +57,39 @@ class FakeAITextClient:
         )
         self.system_prompt: str | None = None
         self.user_prompt: str | None = None
+        self.timeout_seconds: float | None = None
+        self.call_count = 0
 
-    def complete(self, system_prompt: str, user_prompt: str) -> AITextResponse:
+    def complete(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        timeout_seconds: float,
+    ) -> AITextResponse:
         self.system_prompt = system_prompt
         self.user_prompt = user_prompt
+        self.timeout_seconds = timeout_seconds
+        self.call_count += 1
         return self.response
+
+
+class SequencedFakeAITextClient:
+    """按顺序返回响应或抛出已分类错误的测试客户端。"""
+
+    def __init__(self, outcomes: list[AITextResponse | AIClientError]) -> None:
+        self._outcomes = outcomes
+        self.call_count = 0
+        self.timeouts: list[float] = []
+
+    def complete(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        timeout_seconds: float,
+    ) -> AITextResponse:
+        self.timeouts.append(timeout_seconds)
+        outcome = self._outcomes[self.call_count]
+        self.call_count += 1
+        if isinstance(outcome, AIClientError):
+            raise outcome
+        return outcome

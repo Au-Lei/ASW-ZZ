@@ -57,12 +57,63 @@ class AIExtractionTrace:
     recorded_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class ExtractionPolicy:
+    """AI 提取的有限尝试与单次调用超时配置。"""
+
+    max_attempts: int = 2
+    timeout_seconds: float = 30.0
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.max_attempts, bool)
+            or not isinstance(self.max_attempts, int)
+            or self.max_attempts < 1
+        ):
+            raise ValueError("max_attempts 必须是大于等于 1 的整数")
+        if (
+            isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, (int, float))
+            or self.timeout_seconds <= 0
+        ):
+            raise ValueError("timeout_seconds 必须大于 0")
+
+
+class AIClientError(Exception):
+    """AI 客户端可分类错误。"""
+
+    def __init__(self, message: str, *, retryable: bool) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
+
+class AIClientTimeoutError(AIClientError):
+    """单次 AI 调用超过适配器传入的时限。"""
+
+    def __init__(self, message: str = "AI 调用超时") -> None:
+        super().__init__(message, retryable=True)
+
+
+class ManualReviewRequired(FieldExtractionError):
+    """自动提取无法可靠完成，需要转人工处理。"""
+
+    def __init__(self, reason: str, attempts: int) -> None:
+        super().__init__(f"AI 提取未可靠完成，需转人工处理: {reason}")
+        self.reason = reason
+        self.attempts = attempts
+
+
 @runtime_checkable
 class AITextClient(Protocol):
     """能够返回纯文本响应的最小 AI 客户端接口。"""
 
-    def complete(self, system_prompt: str, user_prompt: str) -> AITextResponse:
-        """根据系统提示词和用户提示词返回模型文本。"""
+    def complete(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        timeout_seconds: float,
+    ) -> AITextResponse:
+        """在指定单次超时内返回模型文本。"""
 
         ...
 
@@ -70,16 +121,50 @@ class AITextClient(Protocol):
 class SchemaValidatingFieldExtractor:
     """调用 AI 客户端并将严格 JSON 响应转换为字段结果。"""
 
-    def __init__(self, client: AITextClient) -> None:
+    def __init__(
+        self,
+        client: AITextClient,
+        policy: ExtractionPolicy | None = None,
+    ) -> None:
         self._client = client
+        self._policy = policy or ExtractionPolicy()
         self.last_trace: AIExtractionTrace | None = None
+        self.traces: list[AIExtractionTrace] = []
 
     def extract(self, document: ParsedDocument) -> dict[str, FieldResult]:
         prompt = build_extraction_prompt(document)
-        response = self._client.complete(prompt.system_prompt, prompt.user_prompt)
+        self.last_trace = None
+        self.traces = []
+        for attempt in range(1, self._policy.max_attempts + 1):
+            try:
+                response = self._client.complete(
+                    prompt.system_prompt,
+                    prompt.user_prompt,
+                    self._policy.timeout_seconds,
+                )
+            except AIClientError as error:
+                if error.retryable and attempt < self._policy.max_attempts:
+                    continue
+                reason = "调用超时或暂时不可用" if error.retryable else "调用配置或权限错误"
+                raise ManualReviewRequired(reason, attempt) from error
+
+            try:
+                return self._validate_response(document, response)
+            except FieldExtractionError as error:
+                if attempt < self._policy.max_attempts:
+                    continue
+                raise ManualReviewRequired("响应不符合字段契约", attempt) from error
+
+        raise AssertionError("有限尝试循环不应无结果结束")
+
+    def _validate_response(
+        self,
+        document: ParsedDocument,
+        response: AITextResponse,
+    ) -> dict[str, FieldResult]:
         if not isinstance(response, AITextResponse):
             raise FieldExtractionError("AI 客户端必须返回 AITextResponse")
-        self.last_trace = AIExtractionTrace(
+        trace = AIExtractionTrace(
             document_id=document.document_id,
             service=response.service,
             model=response.model,
@@ -89,6 +174,8 @@ class SchemaValidatingFieldExtractor:
             extractor_version=EXTRACTOR_VERSION,
             recorded_at=datetime.now(timezone.utc),
         )
+        self.last_trace = trace
+        self.traces.append(trace)
         payload = _load_json_object(response.text)
         results = {
             field_name: _parse_field_result(field_name, value)
