@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "case_id": "maersk_001",
+  "case_name": "马士基首个标准样例",
+  "input_document_available": false,
+  "fixture_purpose": "记录业务已确认的期望结果，不代表 OCR 或 AI 的实际提取结果",
+  "assumptions": {
+    "etd_year": 2026,
+    "etd_year_basis": "项目确认的标准样例上下文；真实文件无法确认年份时必须留空并转人工确认"
+  },
+  "expected_fields": {
+    "carrier": "马士基",
+    "salesperson": null,
+    "customer_service": null,
+    "booking_no": "276458899",
+    "contract_no": "299253769",
+    "vessel_name": "MAERSK BERMUDA",
+    "voyage": "638S",
+    "etd": "2026-09-30",
+    "container_summary": "1X20GP",
+    "yard": "青岛港联海",
+    "port_of_loading": "QD",
+    "port_of_discharge": "Manila"
+  }
+}
