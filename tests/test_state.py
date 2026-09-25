@@ -13,6 +13,7 @@ from app.state import (
     SourceDocument,
     SourceEvidence,
     TaskStatus,
+    TaskStatusAudit,
 )
 
 
@@ -130,6 +131,19 @@ class DocumentTaskTests(unittest.TestCase):
         )
 
         self.assertEqual(second.review_history, [])
+
+    def test_status_history_is_not_shared_between_tasks(self) -> None:
+        first = DocumentTask(task_id="task-001")
+        second = DocumentTask(task_id="task-002")
+        first.status_history.append(
+            TaskStatusAudit(
+                TaskStatus.UPLOADED,
+                TaskStatus.EXTRACTING,
+                datetime.now(timezone.utc),
+            )
+        )
+
+        self.assertEqual(second.status_history, [])
 
 
 if __name__ == "__main__":

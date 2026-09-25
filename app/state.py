@@ -126,6 +126,20 @@ class FieldReviewAudit:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskStatusAudit:
+    """任务处理阶段变化记录。"""
+
+    previous_status: TaskStatus
+    new_status: TaskStatus
+    changed_at: datetime
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.changed_at.tzinfo is None:
+            raise ValueError("changed_at 必须包含时区")
+
+
+@dataclass(frozen=True, slots=True)
 class SourceDocument:
     """输入文档的基本信息及受控存储引用。"""
 
@@ -150,10 +164,12 @@ class DocumentTask:
     source_documents: list[SourceDocument] = field(default_factory=list)
     field_results: dict[str, FieldResult] = field(default_factory=dict)
     review_history: list[FieldReviewAudit] = field(default_factory=list)
+    status_history: list[TaskStatusAudit] = field(default_factory=list)
     issues: list[str] = field(default_factory=list)
     extractor_version: str | None = None
     prompt_version: str | None = None
     ruleset_version: str | None = None
+    mapping_version: str | None = None
     template_version: str | None = None
     reviewed_by: str | None = None
     reviewed_at: datetime | None = None
