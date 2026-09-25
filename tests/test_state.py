@@ -1,13 +1,15 @@
 """业务状态数据模型测试。"""
 
 import unittest
-from datetime import timezone
+from datetime import datetime, timezone
 
 from app.state import (
     DocumentTask,
     FieldCandidate,
     FieldResult,
+    FieldReviewAudit,
     HumanReviewStatus,
+    ReviewAction,
     SourceDocument,
     SourceEvidence,
     TaskStatus,
@@ -110,6 +112,24 @@ class DocumentTaskTests(unittest.TestCase):
 
         self.assertEqual(second.field_results, {})
         self.assertEqual(second.issues, [])
+
+    def test_review_history_is_not_shared_between_tasks(self) -> None:
+        first = DocumentTask(task_id="task-001")
+        second = DocumentTask(task_id="task-002")
+        first.review_history.append(
+            FieldReviewAudit(
+                field_name="carrier",
+                action=ReviewAction.ACCEPTED,
+                previous_status=HumanReviewStatus.UNREVIEWED,
+                new_status=HumanReviewStatus.ACCEPTED,
+                previous_value=None,
+                new_value="马士基",
+                operator="operator-1",
+                reviewed_at=datetime.now(timezone.utc),
+            )
+        )
+
+        self.assertEqual(second.review_history, [])
 
 
 if __name__ == "__main__":

@@ -34,6 +34,15 @@ class HumanReviewStatus(StrEnum):
     CONFIRMED_EMPTY = "confirmed_empty"
 
 
+class ReviewAction(StrEnum):
+    """一次字段人工复核操作。"""
+
+    ACCEPTED = "accepted"
+    MODIFIED = "modified"
+    CONFIRMED_EMPTY = "confirmed_empty"
+    RETURNED_FOR_REPROCESSING = "returned_for_reprocessing"
+
+
 @dataclass(frozen=True, slots=True)
 class SourceEvidence:
     """字段值在原始文档中的可追溯证据。
@@ -94,6 +103,29 @@ class FieldResult:
 
 
 @dataclass(frozen=True, slots=True)
+class FieldReviewAudit:
+    """字段复核前后状态的不可变审计记录。"""
+
+    field_name: str
+    action: ReviewAction
+    previous_status: HumanReviewStatus
+    new_status: HumanReviewStatus
+    previous_value: str | None
+    new_value: str | None
+    operator: str
+    reviewed_at: datetime
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.field_name.strip():
+            raise ValueError("field_name 不能为空")
+        if not self.operator.strip():
+            raise ValueError("operator 不能为空")
+        if self.reviewed_at.tzinfo is None:
+            raise ValueError("reviewed_at 必须包含时区")
+
+
+@dataclass(frozen=True, slots=True)
 class SourceDocument:
     """输入文档的基本信息及受控存储引用。"""
 
@@ -117,6 +149,7 @@ class DocumentTask:
     status: TaskStatus = TaskStatus.UPLOADED
     source_documents: list[SourceDocument] = field(default_factory=list)
     field_results: dict[str, FieldResult] = field(default_factory=dict)
+    review_history: list[FieldReviewAudit] = field(default_factory=list)
     issues: list[str] = field(default_factory=list)
     extractor_version: str | None = None
     prompt_version: str | None = None
